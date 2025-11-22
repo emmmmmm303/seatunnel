@@ -49,7 +49,7 @@ import java.util.concurrent.locks.ReentrantLock;
 import static org.apache.seatunnel.connectors.doris.util.ErrorMessages.SHOULD_NOT_HAPPEN_MESSAGE;
 
 @Slf4j
-public class DorisValueReader {
+public class DorisValueReader implements ValueReader {
 
     protected BackendClient client;
     protected Lock clientLock = new ReentrantLock();

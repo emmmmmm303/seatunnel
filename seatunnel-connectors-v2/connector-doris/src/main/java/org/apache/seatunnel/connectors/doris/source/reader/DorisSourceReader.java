@@ -22,6 +22,8 @@ import org.apache.seatunnel.api.source.Collector;
 import org.apache.seatunnel.api.source.SourceReader;
 import org.apache.seatunnel.api.table.catalog.TablePath;
 import org.apache.seatunnel.api.table.type.SeaTunnelRow;
+import org.apache.seatunnel.api.table.type.SeaTunnelRowType;
+import org.apache.seatunnel.api.table.type.SqlType;
 import org.apache.seatunnel.connectors.doris.config.DorisSourceConfig;
 import org.apache.seatunnel.connectors.doris.exception.DorisConnectorErrorCode;
 import org.apache.seatunnel.connectors.doris.exception.DorisConnectorException;
@@ -47,7 +49,7 @@ public class DorisSourceReader implements SourceReader<SeaTunnelRow, DorisSource
     private final Queue<DorisSourceSplit> splitsQueue;
     private volatile boolean noMoreSplits;
 
-    private DorisValueReader valueReader;
+    private ValueReader valueReader;
 
     private final Map<TablePath, DorisSourceTable> tables;
 
@@ -87,8 +89,22 @@ public class DorisSourceReader implements SourceReader<SeaTunnelRow, DorisSource
                                     partition.getDatabase(), partition.getTable()));
                 }
                 valueReader = new DorisValueReader(partition, dorisSourceConfig, dorisSourceTable);
+                SeaTunnelRowType rowType =
+                        dorisSourceTable.getCatalogTable().getTableSchema().toPhysicalRowDataType();
                 while (valueReader.hasNext()) {
                     SeaTunnelRow record = valueReader.next();
+                    normalizeRow(record, rowType);
+                    try {
+                        // Precompute and cache the byte size to avoid ClassCastException inside
+                        // the collector when encountering unexpected numeric/string mixes.
+                        record.getBytesSize(rowType);
+                    } catch (ClassCastException e) {
+                        log.warn(
+                                "Record type mismatch detected, force casting to string for text fields",
+                                e);
+                        normalizeRow(record, rowType);
+                        record.getBytesSize(rowType);
+                    }
                     output.collect(record);
                 }
             }
@@ -120,4 +136,16 @@ public class DorisSourceReader implements SourceReader<SeaTunnelRow, DorisSource
 
     @Override
     public void notifyCheckpointComplete(long checkpointId) throws Exception {}
+
+    private void normalizeRow(SeaTunnelRow row, SeaTunnelRowType rowType) {
+        for (int i = 0; i < row.getArity(); i++) {
+            SqlType sqlType = rowType.getFieldType(i).getSqlType();
+            if (SqlType.STRING == sqlType) {
+                Object value = row.getField(i);
+                if (value != null && !(value instanceof String)) {
+                    row.setField(i, String.valueOf(value));
+                }
+            }
+        }
+    }
 }

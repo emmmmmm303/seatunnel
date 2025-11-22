@@ -85,27 +85,16 @@ public class DorisSourceFactory implements TableSourceFactory {
         Map<TablePath, DorisSourceTable> dorisSourceTables = new HashMap<>();
 
         DorisCatalogFactory dorisCatalogFactory = new DorisCatalogFactory();
-        try (DorisCatalog catalog =
-                (DorisCatalog) dorisCatalogFactory.createCatalog("doris", context.getOptions())) {
+        DorisCatalog catalog = null;
+        try {
+            catalog =
+                    (DorisCatalog) dorisCatalogFactory.createCatalog("doris", context.getOptions());
             catalog.open();
             for (DorisTableConfig dorisTableConfig : dorisTableConfigList) {
-                CatalogTable table;
                 TablePath tablePath = TablePath.of(dorisTableConfig.getTableIdentifier());
+                CatalogTable table =
+                        createCatalogTableFromRemote(catalog, dorisTableConfig, tablePath);
                 String readFields = dorisTableConfig.getReadField();
-                try {
-                    List<String> readFiledList = null;
-                    if (StringUtils.isNotBlank(readFields)) {
-                        readFiledList =
-                                Arrays.stream(readFields.split(","))
-                                        .map(String::trim)
-                                        .collect(Collectors.toList());
-                    }
-
-                    table = catalog.getTable(tablePath, readFiledList);
-                } catch (Exception e) {
-                    log.error("create source error");
-                    throw e;
-                }
                 dorisSourceTables.put(
                         tablePath,
                         DorisSourceTable.builder()
@@ -118,10 +107,33 @@ public class DorisSourceFactory implements TableSourceFactory {
                                 .execMemLimit(dorisTableConfig.getExecMemLimit())
                                 .build());
             }
+        } catch (Exception e) {
+            log.error("create source error");
+            throw new RuntimeException(e);
+        } finally {
+            if (catalog != null) {
+                try {
+                    catalog.close();
+                } catch (Exception ignore) {
+                }
+            }
         }
         return () ->
                 (SeaTunnelSource<T, SplitT, StateT>)
                         new DorisSource(dorisSourceConfig, dorisSourceTables);
+    }
+
+    private CatalogTable createCatalogTableFromRemote(
+            DorisCatalog catalog, DorisTableConfig dorisTableConfig, TablePath tablePath) {
+        String readFields = dorisTableConfig.getReadField();
+        List<String> readFiledList = null;
+        if (StringUtils.isNotBlank(readFields)) {
+            readFiledList =
+                    Arrays.stream(readFields.split(","))
+                            .map(String::trim)
+                            .collect(Collectors.toList());
+        }
+        return catalog.getTable(tablePath, readFiledList);
     }
 
     @Override

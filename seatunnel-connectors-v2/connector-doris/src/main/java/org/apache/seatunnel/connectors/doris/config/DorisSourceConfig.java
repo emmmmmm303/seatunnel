@@ -40,6 +40,8 @@ import static org.apache.seatunnel.connectors.doris.config.DorisSourceOptions.DO
 @SuperBuilder
 public class DorisSourceConfig implements Serializable {
 
+    private static final long serialVersionUID = 7794602291014730808L;
+
     private String frontends;
     private Integer queryPort;
     private String username;
