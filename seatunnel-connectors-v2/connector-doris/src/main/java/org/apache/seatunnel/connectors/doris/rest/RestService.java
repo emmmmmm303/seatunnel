@@ -357,6 +357,11 @@ public class RestService implements Serializable {
 
         if (queryPlan.getStatus() != REST_RESPONSE_STATUS_OK) {
             String errMsg = "Doris FE's response is not OK, status is " + queryPlan.getStatus();
+            if (StringUtils.isNotEmpty(queryPlan.getException())) {
+                errMsg += ", exception: " + queryPlan.getException();
+            } else {
+                errMsg += ", raw response: " + response;
+            }
             logger.error(errMsg);
             throw new DorisConnectorException(DorisConnectorErrorCode.REST_SERVICE_FAILED, errMsg);
         }

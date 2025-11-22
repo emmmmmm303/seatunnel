@@ -17,13 +17,18 @@
 
 package org.apache.seatunnel.connectors.doris.rest.models;
 
+import org.apache.seatunnel.shade.com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+
 import java.util.Map;
 import java.util.Objects;
 
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class QueryPlan {
     private int status;
     private String opaqued_query_plan;
     private Map<String, Tablet> partitions;
+    /** Doris FE returns this when query plan generation fails. */
+    private String exception;
 
     public int getStatus() {
         return status;
@@ -49,6 +54,14 @@ public class QueryPlan {
         this.partitions = partitions;
     }
 
+    public String getException() {
+        return exception;
+    }
+
+    public void setException(String exception) {
+        this.exception = exception;
+    }
+
     @Override
     public boolean equals(Object o) {
         if (this == o) {
@@ -60,11 +73,12 @@ public class QueryPlan {
         QueryPlan queryPlan = (QueryPlan) o;
         return status == queryPlan.status
                 && Objects.equals(opaqued_query_plan, queryPlan.opaqued_query_plan)
-                && Objects.equals(partitions, queryPlan.partitions);
+                && Objects.equals(partitions, queryPlan.partitions)
+                && Objects.equals(exception, queryPlan.exception);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(status, opaqued_query_plan, partitions);
+        return Objects.hash(status, opaqued_query_plan, partitions, exception);
     }
 }
