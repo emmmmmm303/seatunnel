@@ -30,6 +30,7 @@ import org.apache.seatunnel.api.table.type.SeaTunnelDataType;
 import org.apache.seatunnel.api.table.type.SeaTunnelRow;
 import org.apache.seatunnel.api.table.type.SeaTunnelRowType;
 import org.apache.seatunnel.api.table.type.SqlType;
+import org.apache.seatunnel.common.utils.DateTimeUtils;
 import org.apache.seatunnel.connectors.seatunnel.common.source.arrow.converter.Converter;
 import org.apache.seatunnel.connectors.seatunnel.common.source.arrow.converter.DefaultConverter;
 
@@ -70,6 +71,8 @@ public class ArrowToSeatunnelRowReader implements AutoCloseable {
     private final DateTimeFormatter TIME_FORMATTER = DateTimeFormatter.ofPattern("HH:mm:ss");
     private final DateTimeFormatter DATETIME_FORMATTER =
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+    private static final long MICROS_PER_SECOND = 1_000_000L;
+    private static final long NANOS_PER_SECOND = 1_000_000_000L;
 
     static {
         ServiceLoader.load(Converter.class).forEach(converters::add);
@@ -162,9 +165,15 @@ public class ArrowToSeatunnelRowReader implements AutoCloseable {
                     return new String((byte[]) fieldValue);
                 } else if (fieldValue instanceof Text) {
                     return ((Text) fieldValue).toString();
-                } else {
+                }
+                if (fieldValue instanceof String) {
                     return fieldValue;
                 }
+                // Some Doris numeric columns (e.g. tinyint / smallint) may be mapped to STRING in
+                // the catalog while Arrow still carries number primitives. Normalize them to string
+                // to keep the runtime value consistent with the declared schema and avoid
+                // ClassCastException during size estimation.
+                return String.valueOf(fieldValue);
             case DECIMAL:
                 if (fieldValue instanceof String) {
                     return new BigDecimal((String) fieldValue);
@@ -203,20 +212,93 @@ public class ArrowToSeatunnelRowReader implements AutoCloseable {
                     return fieldValue;
                 }
             case TIMESTAMP:
-                if (fieldValue instanceof Long) {
-                    return Instant.ofEpochMilli((Long) fieldValue)
-                            .atZone(ZoneId.systemDefault())
-                            .toLocalDateTime();
-                } else if (fieldValue instanceof String) {
-                    return LocalDateTime.parse((String) fieldValue, DATETIME_FORMATTER);
-                } else if (fieldValue instanceof Text) {
-                    return LocalDateTime.parse(((Text) fieldValue).toString(), DATETIME_FORMATTER);
-                } else {
-                    return fieldValue;
-                }
+                return convertTimestampValue(fieldValue);
             default:
                 return fieldValue;
         }
+    }
+
+    private Object convertTimestampValue(Object fieldValue) {
+        if (fieldValue == null) {
+            return null;
+        }
+        if (fieldValue instanceof LocalDateTime) {
+            return clampTimestamp((LocalDateTime) fieldValue);
+        }
+        if (fieldValue instanceof Long) {
+            return clampTimestamp(convertEpochLongToLocalDateTime((Long) fieldValue));
+        }
+        if (fieldValue instanceof String) {
+            return clampTimestamp(parseTimestampString((String) fieldValue));
+        }
+        if (fieldValue instanceof Text) {
+            return clampTimestamp(parseTimestampString(((Text) fieldValue).toString()));
+        }
+        return fieldValue;
+    }
+
+    /** 解析包含微秒的时间字符串，优先使用可变精度的公共工具类，保证 datetime(6) 不丢失精度。 */
+    private LocalDateTime parseTimestampString(String timestampText) {
+        try {
+            return DateTimeUtils.parse(timestampText);
+        } catch (Exception ignored) {
+            // 兜底继续使用原有格式，避免老格式被破坏
+            return LocalDateTime.parse(timestampText, DATETIME_FORMATTER);
+        }
+    }
+
+    /** 将包含微秒/纳秒精度的 epoch 数值安全转换为 LocalDateTime，避免把微秒误当毫秒导致年份溢出。 */
+    private LocalDateTime convertEpochLongToLocalDateTime(long epochValue) {
+        // 优先按照毫秒解析
+        try {
+            return Instant.ofEpochMilli(epochValue)
+                    .atZone(ZoneId.systemDefault())
+                    .toLocalDateTime();
+        } catch (Exception ignored) {
+            // fall through
+        }
+
+        // 尝试按微秒转换（Doris DATETIME(6) 常见）
+        try {
+            long seconds = Math.floorDiv(epochValue, MICROS_PER_SECOND);
+            long microsRemainder = Math.floorMod(epochValue, MICROS_PER_SECOND);
+            return Instant.ofEpochSecond(seconds, microsRemainder * 1000)
+                    .atZone(ZoneId.systemDefault())
+                    .toLocalDateTime();
+        } catch (Exception ignored) {
+            // fall through
+        }
+
+        // 尝试按纳秒转换
+        try {
+            long seconds = Math.floorDiv(epochValue, NANOS_PER_SECOND);
+            long nanosRemainder = Math.floorMod(epochValue, NANOS_PER_SECOND);
+            return Instant.ofEpochSecond(seconds, nanosRemainder)
+                    .atZone(ZoneId.systemDefault())
+                    .toLocalDateTime();
+        } catch (Exception ignored) {
+            // fall through
+        }
+
+        // 超出范围时，钳位到可表示的边界，避免溢出异常
+        long safeMillis = epochValue > 0 ? Long.MAX_VALUE : Long.MIN_VALUE;
+        log.warn("epoch 值 {} 超出可转换范围，按边界毫秒强制转换，结果可能不准确", epochValue);
+        return Instant.ofEpochMilli(safeMillis).atZone(ZoneId.systemDefault()).toLocalDateTime();
+    }
+
+    private LocalDateTime clampTimestamp(LocalDateTime timestamp) {
+        if (timestamp == null) {
+            return null;
+        }
+        LocalDateTime min = LocalDateTime.of(1, 1, 1, 0, 0, 0);
+        LocalDateTime max = LocalDateTime.of(9999, 12, 31, 23, 59, 59);
+        if (timestamp.isBefore(min)) {
+            return min;
+        }
+        if (timestamp.isAfter(max)) {
+            return max;
+        }
+        return timestamp;
     }
 
     private Object convertArrowData(
